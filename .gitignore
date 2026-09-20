@@ -1,0 +1,12 @@
+.env
+data/
+ssh/
+config/hosts.yml
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.venv/
+venv/
+.mypy_cache/
+.ruff_cache/

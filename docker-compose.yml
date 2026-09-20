@@ -1,0 +1,27 @@
+# Classic docker-compose (v1) friendly — usable on Raspberry Pi.
+# Deploy next to .env, config/hosts.yml, and an ssh/ directory.
+
+version: "3.8"
+
+services:
+  fleet-monitor:
+    build: .
+    container_name: fleet-resource-monitor
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - ./config/hosts.yml:/config/hosts.yml:ro
+      - ./ssh/id_ed25519:/ssh/id_ed25519:ro
+      - ./ssh/known_hosts:/ssh/known_hosts:ro
+      - ./data:/data
+      # Needed so local self-check can see Pi extra_mounts
+      - /media/drive1:/media/drive1:ro
+    # Host network lets localhost self-check the Pi and reach Tailscale peers
+    # the same way the host does (common on Pi + Tailscale setups).
+    network_mode: host
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
