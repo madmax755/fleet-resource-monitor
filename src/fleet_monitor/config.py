@@ -173,6 +173,11 @@ def load_config(
         ram_critical_percent=_env_float("RAM_CRITICAL_PERCENT", 90.0, env_map),
         load_multiplier=_env_float("LOAD_MULTIPLIER", 2.0, env_map),
         load_consecutive_required=_env_int("LOAD_CONSECUTIVE_REQUIRED", 2, env_map),
+        disk_consecutive_required=_env_int("DISK_CONSECUTIVE_REQUIRED", 2, env_map),
+        ram_consecutive_required=_env_int("RAM_CONSECUTIVE_REQUIRED", 2, env_map),
+        unreachable_consecutive_required=_env_int(
+            "UNREACHABLE_CONSECUTIVE_REQUIRED", 2, env_map
+        ),
     )
 
     return AppConfig(

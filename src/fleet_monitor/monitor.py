@@ -13,15 +13,14 @@ from fleet_monitor.state import (
     apply_findings,
     apply_host_reachable_again,
     apply_host_unreachable,
-    bump_load_streak,
     load_state,
     save_state,
     write_heartbeat,
 )
 from fleet_monitor.thresholds import (
-    evaluate_load_after_consecutive,
+    consecutive_required_for,
+    evaluate_load,
     evaluate_static_findings,
-    is_load_elevated,
 )
 
 LOGGER = logging.getLogger(__name__)
@@ -47,6 +46,10 @@ def run_once(config: AppConfig, *, now_unix: float | None = None) -> list[AlertE
     now = time.time() if now_unix is None else now_unix
     state = load_state(config.state_file)
     all_alerts: list[AlertEvent] = []
+    thresholds = config.thresholds
+
+    def required_for(finding_key: str) -> int:
+        return consecutive_required_for(finding_key, thresholds)
 
     for host in config.hosts:
         LOGGER.info("Checking host %s (%s)", host.name, host.host)
@@ -60,6 +63,7 @@ def run_once(config: AppConfig, *, now_unix: float | None = None) -> list[AlertE
                     result.error or "unknown error",
                     now_unix=now,
                     cooldown_seconds=config.alert_cooldown_seconds,
+                    consecutive_required=thresholds.unreachable_consecutive_required,
                 )
             )
             continue
@@ -74,16 +78,17 @@ def run_once(config: AppConfig, *, now_unix: float | None = None) -> list[AlertE
             ", ".join(f"{d.mount}={d.used_percent:.0f}%" for d in result.metrics.disks),
         )
 
-        all_alerts.extend(apply_host_reachable_again(state, host.name, now_unix=now))
-
-        elevated = is_load_elevated(result.metrics, config.thresholds)
-        consecutive = bump_load_streak(state, host.name, elevated)
-        findings: list[Finding] = list(result.findings)
-        load_finding = evaluate_load_after_consecutive(
-            result.metrics,
-            config.thresholds,
-            consecutive,
+        all_alerts.extend(
+            apply_host_reachable_again(
+                state,
+                host.name,
+                now_unix=now,
+                consecutive_required=thresholds.unreachable_consecutive_required,
+            )
         )
+
+        findings: list[Finding] = list(result.findings)
+        load_finding = evaluate_load(result.metrics, thresholds)
         if load_finding is not None:
             findings.append(load_finding)
 
@@ -94,6 +99,7 @@ def run_once(config: AppConfig, *, now_unix: float | None = None) -> list[AlertE
                 findings,
                 now_unix=now,
                 cooldown_seconds=config.alert_cooldown_seconds,
+                consecutive_required=required_for,
             )
         )
 

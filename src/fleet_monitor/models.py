@@ -62,6 +62,9 @@ class ThresholdConfig:
     ram_critical_percent: float = 90.0
     load_multiplier: float = 2.0
     load_consecutive_required: int = 2
+    disk_consecutive_required: int = 2
+    ram_consecutive_required: int = 2
+    unreachable_consecutive_required: int = 2
 
 
 @dataclass(frozen=True)
@@ -94,15 +97,25 @@ class HostCheckResult:
     error: str | None = None
 
 
+# Large streak seeded for legacy state so already-confirmed conditions do not
+# re-alert or require re-confirmation just because we added consecutive fields.
+_LEGACY_CONFIRMED_STREAK = 1_000_000
+
+
 @dataclass
 class ConditionState:
     """Persisted state for one host+condition key."""
 
     severity: str
-    consecutive_load_high: int = 0
+    consecutive_load_high: int = 0  # legacy; mirrored for load keys
     last_alert_unix: float = 0.0
     last_seen_unix: float = 0.0
     message: str = ""
+    candidate_severity: str = ""
+    consecutive_count: int = 0
+
+    def resolved_candidate(self) -> str:
+        return self.candidate_severity or self.severity
 
 
 @dataclass
@@ -120,6 +133,8 @@ class MonitorState:
                     "last_alert_unix": value.last_alert_unix,
                     "last_seen_unix": value.last_seen_unix,
                     "message": value.message,
+                    "candidate_severity": value.resolved_candidate(),
+                    "consecutive_count": value.consecutive_count,
                 }
                 for key, value in self.conditions.items()
             },
@@ -135,12 +150,36 @@ class MonitorState:
             for key, value in raw_conditions.items():
                 if not isinstance(value, Mapping):
                     continue
+                severity = str(value.get("severity", Severity.OK.value))
+                consecutive_load_high = int(value.get("consecutive_load_high", 0))
+                has_new_fields = (
+                    "candidate_severity" in value or "consecutive_count" in value
+                )
+                if has_new_fields:
+                    candidate = str(value.get("candidate_severity", "") or severity)
+                    consecutive_count = int(value.get("consecutive_count", 0))
+                else:
+                    # Migrate legacy state without re-alerting confirmed conditions.
+                    # Preserve in-progress load streaks that had not yet alerted.
+                    if (
+                        str(key).endswith("|load")
+                        and consecutive_load_high > 0
+                        and severity == Severity.OK.value
+                    ):
+                        candidate = Severity.CRITICAL.value
+                        consecutive_count = consecutive_load_high
+                    else:
+                        candidate = severity
+                        consecutive_count = _LEGACY_CONFIRMED_STREAK
+
                 conditions[str(key)] = ConditionState(
-                    severity=str(value.get("severity", Severity.OK.value)),
-                    consecutive_load_high=int(value.get("consecutive_load_high", 0)),
+                    severity=severity,
+                    consecutive_load_high=consecutive_load_high,
                     last_alert_unix=float(value.get("last_alert_unix", 0.0)),
                     last_seen_unix=float(value.get("last_seen_unix", 0.0)),
                     message=str(value.get("message", "")),
+                    candidate_severity=candidate,
+                    consecutive_count=consecutive_count,
                 )
         return cls(
             conditions=conditions,

@@ -1,9 +1,10 @@
-"""Persistent alert state with change detection and cooldown re-alerts."""
+"""Persistent alert state with consecutive confirmation, change detection, and cooldown."""
 
 from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Callable
 from pathlib import Path
 
 from fleet_monitor.models import (
@@ -16,6 +17,8 @@ from fleet_monitor.models import (
 )
 
 LOGGER = logging.getLogger(__name__)
+
+ConsecutiveRequiredFn = Callable[[str], int]
 
 
 def condition_key(host_name: str, finding_key: str) -> str:
@@ -51,6 +54,32 @@ def write_heartbeat(path: Path, unix_ts: float) -> None:
     path.write_text(f"{unix_ts:.3f}\n", encoding="utf-8")
 
 
+def _bump_candidate(
+    previous: ConditionState | None,
+    observed: str,
+) -> tuple[str, int]:
+    if previous is None:
+        return observed, 1
+    if previous.resolved_candidate() == observed:
+        return observed, previous.consecutive_count + 1
+    return observed, 1
+
+
+def _confirmed_severity(previous: ConditionState | None) -> Severity:
+    if previous is None:
+        return Severity.OK
+    try:
+        return Severity(previous.severity)
+    except ValueError:
+        return Severity.OK
+
+
+def _mirror_load_streak(finding_key: str, candidate: str, streak: int) -> int:
+    if finding_key == "load" and candidate == Severity.CRITICAL.value:
+        return streak
+    return 0
+
+
 def apply_findings(
     state: MonitorState,
     host_name: str,
@@ -58,30 +87,48 @@ def apply_findings(
     *,
     now_unix: float,
     cooldown_seconds: int,
+    consecutive_required: ConsecutiveRequiredFn | int = 1,
 ) -> list[AlertEvent]:
     """
     Update state for a reachable host and decide which alerts to emit.
 
     Alert policy:
-    - Emit immediately on severity/state change (including recovery to OK).
-    - While still unhealthy, re-alert at most once per cooldown window
+    - Require N consecutive observations of a new severity before confirming
+      (and alerting) a transition, including recovery to OK. This damps
+      ephemeral flaps without slowing the check interval.
+    - While still confirmed unhealthy, re-alert at most once per cooldown window
       (default 6h) so critical hosts are not silent forever, but do not spam
       every 15-minute loop.
+
+    ``consecutive_required`` may be an int (same for every key) or a callable
+    ``finding_key -> int``. Default 1 preserves legacy immediate transitions.
     """
+    required_for: ConsecutiveRequiredFn
+    if isinstance(consecutive_required, int):
+        required_for = lambda _key, n=consecutive_required: n  # noqa: E731
+    else:
+        required_for = consecutive_required
+
     alerts: list[AlertEvent] = []
     active_keys = {condition_key(host_name, finding.key) for finding in findings}
 
     for finding in findings:
         key = condition_key(host_name, finding.key)
         previous = state.conditions.get(key)
-        previous_severity = (
-            Severity(previous.severity) if previous is not None else Severity.OK
-        )
+        confirmed = _confirmed_severity(previous)
+        candidate, streak = _bump_candidate(previous, finding.severity.value)
+        needed = max(1, required_for(finding.key))
+
         should_alert = False
-        if previous is None or previous_severity != finding.severity:
+        new_confirmed = confirmed
+
+        if streak >= needed and finding.severity != confirmed:
             should_alert = True
+            new_confirmed = finding.severity
         elif (
-            finding.severity != Severity.OK
+            confirmed != Severity.OK
+            and finding.severity == confirmed
+            and previous is not None
             and now_unix - previous.last_alert_unix >= cooldown_seconds
         ):
             should_alert = True
@@ -91,7 +138,7 @@ def apply_findings(
                 AlertEvent(
                     host_name=host_name,
                     kind=finding.kind,
-                    severity=finding.severity,
+                    severity=new_confirmed,
                     message=finding.message,
                     detail=finding.detail,
                     recovered=False,
@@ -102,42 +149,65 @@ def apply_findings(
             last_alert = previous.last_alert_unix if previous is not None else 0.0
 
         state.conditions[key] = ConditionState(
-            severity=finding.severity.value,
-            consecutive_load_high=previous.consecutive_load_high if previous else 0,
+            severity=new_confirmed.value,
+            consecutive_load_high=_mirror_load_streak(finding.key, candidate, streak),
             last_alert_unix=last_alert,
             last_seen_unix=now_unix,
             message=finding.message,
+            candidate_severity=candidate,
+            consecutive_count=streak,
         )
 
-    # Recoveries: previously unhealthy keys for this host that are now clear
+    # Recoveries / OK confirmation: previously tracked keys for this host that
+    # are not in the current findings list.
     for key, previous in list(state.conditions.items()):
         if not key.startswith(f"{host_name}|"):
             continue
         if key in active_keys:
             continue
-        if previous.severity == Severity.OK.value:
-            previous.last_seen_unix = now_unix
-            continue
 
         finding_key = key.split("|", 1)[1]
-        kind = _kind_from_finding_key(finding_key)
-        message = f"{host_name} recovered: {finding_key} back to OK"
-        alerts.append(
-            AlertEvent(
-                host_name=host_name,
-                kind=AlertKind.RECOVERY,
-                severity=Severity.OK,
-                message=message,
-                detail=previous.message,
-                recovered=True,
+        if finding_key == "unreachable":
+            # Reachability is handled by apply_host_reachable_again.
+            continue
+
+        candidate, streak = _bump_candidate(previous, Severity.OK.value)
+        needed = max(1, required_for(finding_key))
+        confirmed = _confirmed_severity(previous)
+        new_confirmed = confirmed
+        should_alert = False
+        message = previous.message
+
+        if streak >= needed and confirmed != Severity.OK:
+            should_alert = True
+            new_confirmed = Severity.OK
+            message = f"{host_name} recovered: {finding_key} back to OK"
+        elif confirmed == Severity.OK:
+            message = previous.message or f"{host_name} {finding_key} OK"
+
+        if should_alert:
+            alerts.append(
+                AlertEvent(
+                    host_name=host_name,
+                    kind=AlertKind.RECOVERY,
+                    severity=Severity.OK,
+                    message=message,
+                    detail=previous.message,
+                    recovered=True,
+                )
             )
-        )
+            last_alert = now_unix
+        else:
+            last_alert = previous.last_alert_unix
+
         state.conditions[key] = ConditionState(
-            severity=Severity.OK.value,
-            consecutive_load_high=0 if finding_key == "load" else previous.consecutive_load_high,
-            last_alert_unix=now_unix,
+            severity=new_confirmed.value,
+            consecutive_load_high=_mirror_load_streak(finding_key, candidate, streak),
+            last_alert_unix=last_alert,
             last_seen_unix=now_unix,
             message=message,
+            candidate_severity=candidate,
+            consecutive_count=streak,
         )
 
     return alerts
@@ -150,15 +220,27 @@ def apply_host_unreachable(
     *,
     now_unix: float,
     cooldown_seconds: int,
+    consecutive_required: int = 1,
 ) -> list[AlertEvent]:
     key = condition_key(host_name, "unreachable")
     previous = state.conditions.get(key)
-    should_alert = (
-        previous is None
-        or previous.severity != Severity.CRITICAL.value
-        or now_unix - previous.last_alert_unix >= cooldown_seconds
-    )
+    confirmed = _confirmed_severity(previous)
+    candidate, streak = _bump_candidate(previous, Severity.CRITICAL.value)
+    needed = max(1, consecutive_required)
     message = f"{host_name} unreachable: {error}"
+
+    should_alert = False
+    new_confirmed = confirmed
+    if streak >= needed and confirmed != Severity.CRITICAL:
+        should_alert = True
+        new_confirmed = Severity.CRITICAL
+    elif (
+        confirmed == Severity.CRITICAL
+        and previous is not None
+        and now_unix - previous.last_alert_unix >= cooldown_seconds
+    ):
+        should_alert = True
+
     alerts: list[AlertEvent] = []
     if should_alert:
         alerts.append(
@@ -176,11 +258,13 @@ def apply_host_unreachable(
         last_alert = previous.last_alert_unix if previous is not None else 0.0
 
     state.conditions[key] = ConditionState(
-        severity=Severity.CRITICAL.value,
+        severity=new_confirmed.value,
         consecutive_load_high=0,
         last_alert_unix=last_alert,
         last_seen_unix=now_unix,
         message=message,
+        candidate_severity=candidate,
+        consecutive_count=streak,
     )
     return alerts
 
@@ -190,32 +274,57 @@ def apply_host_reachable_again(
     host_name: str,
     *,
     now_unix: float,
+    consecutive_required: int = 1,
 ) -> list[AlertEvent]:
     key = condition_key(host_name, "unreachable")
     previous = state.conditions.get(key)
-    if previous is None or previous.severity == Severity.OK.value:
+    if previous is None:
         return []
-    message = f"{host_name} reachable again"
+
+    confirmed = _confirmed_severity(previous)
+    candidate, streak = _bump_candidate(previous, Severity.OK.value)
+    needed = max(1, consecutive_required)
+    new_confirmed = confirmed
+    should_alert = False
+    message = previous.message
+
+    if streak >= needed and confirmed != Severity.OK:
+        should_alert = True
+        new_confirmed = Severity.OK
+        message = f"{host_name} reachable again"
+    elif confirmed == Severity.OK:
+        message = previous.message or f"{host_name} reachable"
+
+    alerts: list[AlertEvent] = []
+    if should_alert:
+        alerts.append(
+            AlertEvent(
+                host_name=host_name,
+                kind=AlertKind.RECOVERY,
+                severity=Severity.OK,
+                message=message,
+                detail=previous.message,
+                recovered=True,
+            )
+        )
+        last_alert = now_unix
+    else:
+        last_alert = previous.last_alert_unix
+
     state.conditions[key] = ConditionState(
-        severity=Severity.OK.value,
+        severity=new_confirmed.value,
         consecutive_load_high=0,
-        last_alert_unix=now_unix,
+        last_alert_unix=last_alert,
         last_seen_unix=now_unix,
         message=message,
+        candidate_severity=candidate,
+        consecutive_count=streak,
     )
-    return [
-        AlertEvent(
-            host_name=host_name,
-            kind=AlertKind.RECOVERY,
-            severity=Severity.OK,
-            message=message,
-            detail=previous.message,
-            recovered=True,
-        )
-    ]
+    return alerts
 
 
 def bump_load_streak(state: MonitorState, host_name: str, elevated: bool) -> int:
+    """Legacy helper kept for tests; prefer consecutive confirmation in apply_findings."""
     key = condition_key(host_name, "load")
     previous = state.conditions.get(key)
     consecutive = (previous.consecutive_load_high if previous else 0) + 1 if elevated else 0
@@ -223,19 +332,21 @@ def bump_load_streak(state: MonitorState, host_name: str, elevated: bool) -> int
         state.conditions[key] = ConditionState(
             severity=Severity.OK.value,
             consecutive_load_high=consecutive,
+            candidate_severity=(
+                Severity.CRITICAL.value if elevated else Severity.OK.value
+            ),
+            consecutive_count=consecutive if elevated else 0,
         )
     else:
         previous.consecutive_load_high = consecutive
+        if elevated:
+            if previous.resolved_candidate() == Severity.CRITICAL.value:
+                previous.consecutive_count += 1
+            else:
+                previous.candidate_severity = Severity.CRITICAL.value
+                previous.consecutive_count = 1
+        else:
+            previous.candidate_severity = Severity.OK.value
+            previous.consecutive_count = 1
     return consecutive
 
-
-def _kind_from_finding_key(finding_key: str) -> AlertKind:
-    if finding_key.startswith("disk:"):
-        return AlertKind.DISK
-    if finding_key == "ram":
-        return AlertKind.RAM
-    if finding_key == "load":
-        return AlertKind.LOAD
-    if finding_key == "unreachable":
-        return AlertKind.HOST_UNREACHABLE
-    return AlertKind.CHECKER_FAILURE

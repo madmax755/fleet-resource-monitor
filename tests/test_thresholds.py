@@ -4,7 +4,9 @@ from __future__ import annotations
 
 from fleet_monitor.models import DiskUsage, HostMetrics, Severity, ThresholdConfig
 from fleet_monitor.thresholds import (
+    consecutive_required_for,
     evaluate_disk,
+    evaluate_load,
     evaluate_load_after_consecutive,
     evaluate_ram,
     evaluate_static_findings,
@@ -83,3 +85,25 @@ def test_static_findings_combine_disk_and_ram() -> None:
     )
     kinds = {f.kind.value for f in findings}
     assert kinds == {"disk", "ram"}
+
+
+def test_evaluate_load_without_streak() -> None:
+    thresholds = ThresholdConfig(load_multiplier=2.0)
+    metrics = _metrics(load1=8.0, nproc=4)
+    finding = evaluate_load(metrics, thresholds)
+    assert finding is not None
+    assert finding.key == "load"
+    assert evaluate_load(_metrics(load1=1.0, nproc=4), thresholds) is None
+
+
+def test_consecutive_required_for_keys() -> None:
+    thresholds = ThresholdConfig(
+        disk_consecutive_required=2,
+        ram_consecutive_required=3,
+        load_consecutive_required=4,
+        unreachable_consecutive_required=5,
+    )
+    assert consecutive_required_for("disk:/", thresholds) == 2
+    assert consecutive_required_for("ram", thresholds) == 3
+    assert consecutive_required_for("load", thresholds) == 4
+    assert consecutive_required_for("unreachable", thresholds) == 5

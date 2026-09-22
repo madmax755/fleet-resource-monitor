@@ -14,9 +14,10 @@ no docker prune, just resource paging with no silent death if the checker dies.
 - Localhost self-check for the Pi (including extra mounts like `/media/drive1`)
 - Disk warn ≥85% / critical ≥92% (configurable; optional extra mounts)
 - RAM critical ≥90% using `MemAvailable`
-- Load alert only if `load1 ≥ 2× nproc` for **two consecutive** checks
+- Load alert if `load1 ≥ 2× nproc`
+- **Consecutive confirmation** (default 2 checks ≈ 30m at 15m interval) for disk, RAM, load, and host unreachable — both into alert and back to OK — to damp ephemeral flaps
 - ntfy alerts with high priority for critical events (example topic: `fleet-resources`)
-- State file: alert on **state change**, re-alert every **6 hours** while still unhealthy
+- State file: alert on **confirmed state change**, re-alert every **6 hours** while still unhealthy
 - Heartbeat file + Docker `HEALTHCHECK` so a wedged loop is visible
 - Checker failures themselves attempt an ntfy page
 - `--once` / `--dry-run` for safe first runs
@@ -39,9 +40,12 @@ fleet-resource-monitor/
 
 Persisted in `STATE_FILE` (default `/data/state.json`):
 
-1. **Transition alert** — first time a condition becomes warn/critical, or severity changes, or the host becomes unreachable.
-2. **Recovery alert** — when the condition returns to OK (or the host is reachable again).
-3. **Cooldown re-alert** — if still unhealthy after `ALERT_COOLDOWN_SECONDS` (default `21600` = 6h), page again so long-running problems are not forgotten, without spamming every 15-minute loop.
+1. **Consecutive confirmation** — a new severity (warn/critical/unreachable **or** recovery to OK) must be observed for N consecutive checks before it is confirmed. Defaults are 2 for disk, RAM, load, and unreachable (`*_CONSECUTIVE_REQUIRED`). At the default 15-minute interval that is about 30 minutes before the first page or clear — enough to kill one-shot flaps without hiding real problems.
+2. **Transition alert** — when a severity is confirmed (including host unreachable).
+3. **Recovery alert** — when OK / reachable is confirmed after an unhealthy state.
+4. **Cooldown re-alert** — if still confirmed unhealthy after `ALERT_COOLDOWN_SECONDS` (default `21600` = 6h), page again so long-running problems are not forgotten, without spamming every 15-minute loop.
+
+Legacy state files without the new consecutive fields are migrated in place: already-confirmed conditions stay confirmed (no re-alert storm); in-progress load streaks are preserved.
 
 ## Quick start (clone)
 
@@ -156,7 +160,10 @@ pytest -q
 | `DISK_CRITICAL_PERCENT` | `92` | Disk critical threshold |
 | `RAM_CRITICAL_PERCENT` | `90` | RAM critical (MemAvailable) |
 | `LOAD_MULTIPLIER` | `2` | `load1` vs `nproc` factor |
-| `LOAD_CONSECUTIVE_REQUIRED` | `2` | Consecutive elevated checks |
+| `DISK_CONSECUTIVE_REQUIRED` | `2` | Consecutive disk warn/critical (and OK) checks |
+| `RAM_CONSECUTIVE_REQUIRED` | `2` | Consecutive RAM critical (and OK) checks |
+| `LOAD_CONSECUTIVE_REQUIRED` | `2` | Consecutive elevated load (and OK) checks |
+| `UNREACHABLE_CONSECUTIVE_REQUIRED` | `2` | Consecutive unreachable (and reachable) checks |
 
 ## SSH behaviour
 

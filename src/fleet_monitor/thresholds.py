@@ -61,13 +61,9 @@ def is_load_elevated(metrics: HostMetrics, thresholds: ThresholdConfig) -> bool:
     return metrics.load1 >= limit
 
 
-def evaluate_load_after_consecutive(
-    metrics: HostMetrics,
-    thresholds: ThresholdConfig,
-    consecutive_high: int,
-) -> Finding | None:
-    """Return a load finding only once consecutive_high meets the required streak."""
-    if consecutive_high < thresholds.load_consecutive_required:
+def evaluate_load(metrics: HostMetrics, thresholds: ThresholdConfig) -> Finding | None:
+    """Return a load finding when load1 is elevated (confirmation is in state)."""
+    if not is_load_elevated(metrics, thresholds):
         return None
     limit = thresholds.load_multiplier * metrics.nproc
     return Finding(
@@ -76,10 +72,31 @@ def evaluate_load_after_consecutive(
         severity=Severity.CRITICAL,
         message=(
             f"{metrics.host_name} load1={metrics.load1:.2f} "
-            f">= {thresholds.load_multiplier:.0f}×nproc ({limit:.2f}) "
-            f"for {consecutive_high} consecutive checks"
+            f">= {thresholds.load_multiplier:.0f}×nproc ({limit:.2f})"
         ),
         detail=f"nproc={metrics.nproc}",
+    )
+
+
+def evaluate_load_after_consecutive(
+    metrics: HostMetrics,
+    thresholds: ThresholdConfig,
+    consecutive_high: int,
+) -> Finding | None:
+    """Compatibility helper: only emit once consecutive_high meets the required streak."""
+    if consecutive_high < thresholds.load_consecutive_required:
+        return None
+    finding = evaluate_load(metrics, thresholds)
+    if finding is None:
+        return None
+    return Finding(
+        key=finding.key,
+        kind=finding.kind,
+        severity=finding.severity,
+        message=(
+            f"{finding.message} for {consecutive_high} consecutive checks"
+        ),
+        detail=finding.detail,
     )
 
 
@@ -87,8 +104,24 @@ def evaluate_static_findings(
     metrics: HostMetrics,
     thresholds: ThresholdConfig,
 ) -> list[Finding]:
-    """Disk + RAM findings (load is handled with consecutive state)."""
+    """Disk + RAM findings (load is evaluated separately)."""
     return [
         *evaluate_disk(metrics, thresholds),
         *evaluate_ram(metrics, thresholds),
     ]
+
+
+def consecutive_required_for(
+    finding_key: str,
+    thresholds: ThresholdConfig,
+) -> int:
+    """Map a finding key to its consecutive-confirmation requirement."""
+    if finding_key.startswith("disk:"):
+        return thresholds.disk_consecutive_required
+    if finding_key == "ram":
+        return thresholds.ram_consecutive_required
+    if finding_key == "load":
+        return thresholds.load_consecutive_required
+    if finding_key == "unreachable":
+        return thresholds.unreachable_consecutive_required
+    return 2
