@@ -1,3 +1,3 @@
 """Fleet resource monitor — SSH checks + ntfy alerts for always-on hosts."""
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"
