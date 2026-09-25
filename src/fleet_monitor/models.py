@@ -17,6 +17,7 @@ class AlertKind(str, Enum):
     DISK = "disk"
     RAM = "ram"
     LOAD = "load"
+    TEMP = "temp"
     HOST_UNREACHABLE = "host_unreachable"
     CHECKER_FAILURE = "checker_failure"
     RECOVERY = "recovery"
@@ -46,6 +47,7 @@ class HostMetrics:
     mem_total_kb: int
     load1: float
     nproc: int
+    temp_celsius: float | None = None
 
     @property
     def ram_used_percent(self) -> float:
@@ -61,9 +63,12 @@ class ThresholdConfig:
     disk_critical_percent: float = 92.0
     ram_critical_percent: float = 90.0
     load_multiplier: float = 2.0
+    temp_warn_celsius: float = 70.0
+    temp_critical_celsius: float = 80.0
     load_consecutive_required: int = 2
     disk_consecutive_required: int = 2
     ram_consecutive_required: int = 2
+    temp_consecutive_required: int = 1
     unreachable_consecutive_required: int = 2
 
 

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "fleet-resource-monitor"
-version = "1.1.0"
+version = "1.2.0"
 description = "Raspberry Pi fleet resource monitor with ntfy alerts"
 readme = "README.md"
 requires-python = ">=3.11"

@@ -1,4 +1,4 @@
-"""Threshold evaluation for disk, RAM, and load."""
+"""Threshold evaluation for disk, RAM, load, and temperature."""
 
 from __future__ import annotations
 
@@ -56,6 +56,35 @@ def evaluate_ram(metrics: HostMetrics, thresholds: ThresholdConfig) -> list[Find
     ]
 
 
+def evaluate_temp(metrics: HostMetrics, thresholds: ThresholdConfig) -> list[Finding]:
+    """Emit a temp finding when a sensor reading crosses warn/critical thresholds.
+
+    Hosts with no readable thermal sensor (``temp_celsius is None``) produce no
+    finding — common on Proxmox LXCs — and must not invent an error.
+    """
+    temp = metrics.temp_celsius
+    if temp is None:
+        return []
+    if temp >= thresholds.temp_critical_celsius:
+        severity = Severity.CRITICAL
+    elif temp >= thresholds.temp_warn_celsius:
+        severity = Severity.WARN
+    else:
+        return []
+    return [
+        Finding(
+            key="temp",
+            kind=AlertKind.TEMP,
+            severity=severity,
+            message=f"{metrics.host_name} temperature at {temp:.1f}°C",
+            detail=(
+                f"warn>={thresholds.temp_warn_celsius:.0f}°C "
+                f"critical>={thresholds.temp_critical_celsius:.0f}°C"
+            ),
+        )
+    ]
+
+
 def is_load_elevated(metrics: HostMetrics, thresholds: ThresholdConfig) -> bool:
     limit = thresholds.load_multiplier * metrics.nproc
     return metrics.load1 >= limit
@@ -104,10 +133,11 @@ def evaluate_static_findings(
     metrics: HostMetrics,
     thresholds: ThresholdConfig,
 ) -> list[Finding]:
-    """Disk + RAM findings (load is evaluated separately)."""
+    """Disk + RAM + temperature findings (load is evaluated separately)."""
     return [
         *evaluate_disk(metrics, thresholds),
         *evaluate_ram(metrics, thresholds),
+        *evaluate_temp(metrics, thresholds),
     ]
 
 
@@ -122,6 +152,8 @@ def consecutive_required_for(
         return thresholds.ram_consecutive_required
     if finding_key == "load":
         return thresholds.load_consecutive_required
+    if finding_key == "temp":
+        return thresholds.temp_consecutive_required
     if finding_key == "unreachable":
         return thresholds.unreachable_consecutive_required
     return 2
