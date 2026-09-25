@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from fleet_monitor.collector import MetricCollectionError, parse_metrics_output
-from fleet_monitor.config import load_hosts_inventory
+from fleet_monitor.config import load_config, load_hosts_inventory
 
 
 SAMPLE_OUTPUT = """\
@@ -16,6 +16,14 @@ DISK\t/mnt/data\t88
 MEM\t2048000\t8192000
 LOAD\t1.25
 NPROC\t4
+"""
+
+SAMPLE_OUTPUT_WITH_TEMP = """\
+DISK\t/\t71
+MEM\t2048000\t8192000
+LOAD\t1.25
+NPROC\t4
+TEMP\t72.500
 """
 
 
@@ -28,6 +36,21 @@ def test_parse_metrics_output() -> None:
     assert metrics.ram_used_percent == pytest.approx(75.0)
     assert metrics.load1 == 1.25
     assert metrics.nproc == 4
+    assert metrics.temp_celsius is None
+
+
+def test_parse_metrics_with_temp_sensor() -> None:
+    metrics = parse_metrics_output("pi", SAMPLE_OUTPUT_WITH_TEMP)
+    assert metrics.temp_celsius == pytest.approx(72.5)
+    assert metrics.load1 == 1.25
+    assert len(metrics.disks) == 1
+
+
+def test_parse_metrics_absent_temp_still_ok() -> None:
+    """Hosts without thermal zones (e.g. LXCs) must still parse successfully."""
+    metrics = parse_metrics_output("lxc", SAMPLE_OUTPUT)
+    assert metrics.temp_celsius is None
+    assert metrics.mem_total_kb == 8_192_000
 
 
 def test_parse_metrics_rejects_incomplete() -> None:
@@ -57,3 +80,60 @@ hosts:
     hosts = {host.name: host for host in load_hosts_inventory(inventory)}
     assert hosts["proxmox"].proxy_jump == "max-kendall@100.100.126.125"
     assert hosts["pi"].local is True
+
+
+def test_load_config_temp_threshold_defaults(tmp_path: Path) -> None:
+    inventory = tmp_path / "hosts.yml"
+    inventory.write_text(
+        """
+hosts:
+  - name: pi
+    host: localhost
+    user: local
+    local: true
+""",
+        encoding="utf-8",
+    )
+    env = {
+        "HOSTS_FILE": str(inventory),
+        "NTFY_URL": "https://ntfy.example.com",
+        "NTFY_TOPIC": "fleet-resources",
+        "STATE_FILE": str(tmp_path / "state.json"),
+        "HEARTBEAT_FILE": str(tmp_path / "heartbeat"),
+        "SSH_IDENTITY_FILE": str(tmp_path / "id"),
+        "SSH_KNOWN_HOSTS": str(tmp_path / "known_hosts"),
+    }
+    config = load_config(env)
+    assert config.thresholds.temp_warn_celsius == 70.0
+    assert config.thresholds.temp_critical_celsius == 80.0
+    assert config.thresholds.temp_consecutive_required == 1
+
+
+def test_load_config_temp_threshold_overrides(tmp_path: Path) -> None:
+    inventory = tmp_path / "hosts.yml"
+    inventory.write_text(
+        """
+hosts:
+  - name: pi
+    host: localhost
+    user: local
+    local: true
+""",
+        encoding="utf-8",
+    )
+    env = {
+        "HOSTS_FILE": str(inventory),
+        "NTFY_URL": "https://ntfy.example.com",
+        "NTFY_TOPIC": "fleet-resources",
+        "STATE_FILE": str(tmp_path / "state.json"),
+        "HEARTBEAT_FILE": str(tmp_path / "heartbeat"),
+        "SSH_IDENTITY_FILE": str(tmp_path / "id"),
+        "SSH_KNOWN_HOSTS": str(tmp_path / "known_hosts"),
+        "TEMP_WARN_CELSIUS": "65",
+        "TEMP_CRITICAL_CELSIUS": "75",
+        "TEMP_CONSECUTIVE_REQUIRED": "2",
+    }
+    config = load_config(env)
+    assert config.thresholds.temp_warn_celsius == 65.0
+    assert config.thresholds.temp_critical_celsius == 75.0
+    assert config.thresholds.temp_consecutive_required == 2

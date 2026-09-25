@@ -69,13 +69,19 @@ def run_once(config: AppConfig, *, now_unix: float | None = None) -> list[AlertE
             continue
 
         assert result.metrics is not None
+        temp_part = (
+            f" temp={result.metrics.temp_celsius:.1f}C"
+            if result.metrics.temp_celsius is not None
+            else ""
+        )
         LOGGER.info(
-            "Host %s OK: ram=%.1f%% load1=%.2f nproc=%d disks=%s",
+            "Host %s OK: ram=%.1f%% load1=%.2f nproc=%d disks=%s%s",
             host.name,
             result.metrics.ram_used_percent,
             result.metrics.load1,
             result.metrics.nproc,
             ", ".join(f"{d.mount}={d.used_percent:.0f}%" for d in result.metrics.disks),
+            temp_part,
         )
 
         all_alerts.extend(

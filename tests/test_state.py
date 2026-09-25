@@ -261,6 +261,28 @@ def test_unreachable_requires_consecutive_both_ways() -> None:
     assert up[0].recovered is True
 
 
+def test_temp_alerts_on_single_check_by_default() -> None:
+    """Temperature consecutive default is 1 — first hot reading should page."""
+    state = MonitorState()
+    finding = Finding(
+        key="temp",
+        kind=AlertKind.TEMP,
+        severity=Severity.CRITICAL,
+        message="pi temperature at 82.0°C",
+    )
+    alerts = apply_findings(
+        state,
+        "pi",
+        [finding],
+        now_unix=1.0,
+        cooldown_seconds=21_600,
+        consecutive_required=1,
+    )
+    assert len(alerts) == 1
+    assert alerts[0].kind is AlertKind.TEMP
+    assert alerts[0].severity is Severity.CRITICAL
+
+
 def test_legacy_state_migration_preserves_confirmed(tmp_path: Path) -> None:
     path = tmp_path / "state.json"
     path.write_text(

@@ -1,7 +1,7 @@
 # Fleet Resource Monitor
 
 Independent Raspberry Pi watcher that SSHes over Tailscale to always-on hosts,
-checks disk / RAM / load, and pages a self-hosted [ntfy](https://ntfy.sh) topic
+checks disk / RAM / load / temperature, and pages a self-hosted [ntfy](https://ntfy.sh) topic
 on threshold crossings and recoveries.
 
 Designed to sit next to Uptime Kuma — not a replacement for it. No Prometheus,
@@ -15,7 +15,8 @@ no docker prune, just resource paging with no silent death if the checker dies.
 - Disk warn ≥85% / critical ≥92% (configurable; optional extra mounts)
 - RAM critical ≥90% using `MemAvailable`
 - Load alert if `load1 ≥ 2× nproc`
-- **Consecutive confirmation** (default 2 checks ≈ 30m at 15m interval) for disk, RAM, load, and host unreachable — both into alert and back to OK — to damp ephemeral flaps
+- Temperature warn ≥70°C / critical ≥80°C when a thermal sensor is readable (hottest `/sys/class/thermal/thermal_zone*/temp`, optionally maxed with `vcgencmd measure_temp` on Pi); skipped silently when no sensor (e.g. Proxmox LXCs)
+- **Consecutive confirmation** (default 2 checks ≈ 30m at 15m interval) for disk, RAM, load, and host unreachable — both into alert and back to OK — to damp ephemeral flaps. Temperature defaults to **1** so a single hot reading can page (thermal runaway is too fast for a 30-minute wait)
 - ntfy alerts with high priority for critical events (example topic: `fleet-resources`)
 - State file: alert on **confirmed state change**, re-alert every **6 hours** while still unhealthy
 - Heartbeat file + Docker `HEALTHCHECK` so a wedged loop is visible
@@ -40,7 +41,7 @@ fleet-resource-monitor/
 
 Persisted in `STATE_FILE` (default `/data/state.json`):
 
-1. **Consecutive confirmation** — a new severity (warn/critical/unreachable **or** recovery to OK) must be observed for N consecutive checks before it is confirmed. Defaults are 2 for disk, RAM, load, and unreachable (`*_CONSECUTIVE_REQUIRED`). At the default 15-minute interval that is about 30 minutes before the first page or clear — enough to kill one-shot flaps without hiding real problems.
+1. **Consecutive confirmation** — a new severity (warn/critical/unreachable **or** recovery to OK) must be observed for N consecutive checks before it is confirmed. Defaults are 2 for disk, RAM, load, and unreachable (`*_CONSECUTIVE_REQUIRED`), and **1** for temperature (`TEMP_CONSECUTIVE_REQUIRED`) so a single hot reading can page. At the default 15-minute interval, N=2 is about 30 minutes before the first page or clear — enough to kill one-shot flaps without hiding real problems; waiting that long for thermal runaway is too slow.
 2. **Transition alert** — when a severity is confirmed (including host unreachable).
 3. **Recovery alert** — when OK / reachable is confirmed after an unhealthy state.
 4. **Cooldown re-alert** — if still confirmed unhealthy after `ALERT_COOLDOWN_SECONDS` (default `21600` = 6h), page again so long-running problems are not forgotten, without spamming every 15-minute loop.
@@ -160,9 +161,12 @@ pytest -q
 | `DISK_CRITICAL_PERCENT` | `92` | Disk critical threshold |
 | `RAM_CRITICAL_PERCENT` | `90` | RAM critical (MemAvailable) |
 | `LOAD_MULTIPLIER` | `2` | `load1` vs `nproc` factor |
+| `TEMP_WARN_CELSIUS` | `70` | SoC/CPU temperature warn (°C) |
+| `TEMP_CRITICAL_CELSIUS` | `80` | SoC/CPU temperature critical (°C; Pi soft-throttle territory) |
 | `DISK_CONSECUTIVE_REQUIRED` | `2` | Consecutive disk warn/critical (and OK) checks |
 | `RAM_CONSECUTIVE_REQUIRED` | `2` | Consecutive RAM critical (and OK) checks |
 | `LOAD_CONSECUTIVE_REQUIRED` | `2` | Consecutive elevated load (and OK) checks |
+| `TEMP_CONSECUTIVE_REQUIRED` | `1` | Consecutive temperature warn/critical (and OK) checks |
 | `UNREACHABLE_CONSECUTIVE_REQUIRED` | `2` | Consecutive unreachable (and reachable) checks |
 
 ## SSH behaviour
@@ -172,7 +176,7 @@ pytest -q
 - `StrictHostKeyChecking=yes` + mounted `known_hosts`
 - Direct Tailscale SSH by default; optional `ProxyJump` from inventory
 
-Remote collection is a small POSIX shell snippet over SSH stdin (disk via `df -P`, RAM via `/proc/meminfo`, load via `/proc/loadavg`, CPUs via `nproc`).
+Remote collection is a small POSIX shell snippet over SSH stdin (disk via `df -P`, RAM via `/proc/meminfo`, load via `/proc/loadavg`, CPUs via `nproc`, temperature via the hottest readable `/sys/class/thermal/thermal_zone*/temp` and optionally `vcgencmd measure_temp`). If no thermal sensor is available the host check still succeeds; temperature is simply omitted.
 
 ## Secrets (do not commit)
 

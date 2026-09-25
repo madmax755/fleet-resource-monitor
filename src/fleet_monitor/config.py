@@ -172,9 +172,12 @@ def load_config(
         disk_critical_percent=_env_float("DISK_CRITICAL_PERCENT", 92.0, env_map),
         ram_critical_percent=_env_float("RAM_CRITICAL_PERCENT", 90.0, env_map),
         load_multiplier=_env_float("LOAD_MULTIPLIER", 2.0, env_map),
+        temp_warn_celsius=_env_float("TEMP_WARN_CELSIUS", 70.0, env_map),
+        temp_critical_celsius=_env_float("TEMP_CRITICAL_CELSIUS", 80.0, env_map),
         load_consecutive_required=_env_int("LOAD_CONSECUTIVE_REQUIRED", 2, env_map),
         disk_consecutive_required=_env_int("DISK_CONSECUTIVE_REQUIRED", 2, env_map),
         ram_consecutive_required=_env_int("RAM_CONSECUTIVE_REQUIRED", 2, env_map),
+        temp_consecutive_required=_env_int("TEMP_CONSECUTIVE_REQUIRED", 1, env_map),
         unreachable_consecutive_required=_env_int(
             "UNREACHABLE_CONSECUTIVE_REQUIRED", 2, env_map
         ),

@@ -44,6 +44,37 @@ else
   nproc_val="$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 1)"
 fi
 printf 'NPROC\t%s\n' "$nproc_val"
+# Optional SoC/CPU temperature: hottest thermal_zone (millidegrees C),
+# plus vcgencmd on Raspberry Pi when present. Skip silently if none.
+max_mc=""
+for zone_temp in /sys/class/thermal/thermal_zone*/temp; do
+  [ -r "$zone_temp" ] || continue
+  val="$(cat "$zone_temp" 2>/dev/null || true)"
+  case "$val" in
+    ''|*[!0-9]*) continue ;;
+  esac
+  if [ -z "$max_mc" ] || [ "$val" -gt "$max_mc" ]; then
+    max_mc="$val"
+  fi
+done
+max_c=""
+if [ -n "$max_mc" ]; then
+  max_c="$(awk -v m="$max_mc" 'BEGIN { printf "%.3f", m/1000.0 }')"
+fi
+if command -v vcgencmd >/dev/null 2>&1; then
+  vc_out="$(vcgencmd measure_temp 2>/dev/null || true)"
+  vc_c="$(printf '%s' "$vc_out" | sed -n "s/^temp=\\([0-9.][0-9.]*\\).*/\\1/p")"
+  if [ -n "$vc_c" ]; then
+    if [ -z "$max_c" ]; then
+      max_c="$vc_c"
+    else
+      max_c="$(awk -v a="$max_c" -v b="$vc_c" 'BEGIN { printf "%.3f", (a > b) ? a : b }')"
+    fi
+  fi
+fi
+if [ -n "$max_c" ]; then
+  printf 'TEMP\t%s\n' "$max_c"
+fi
 """
 
 
@@ -83,6 +114,7 @@ def parse_metrics_output(host_name: str, output: str) -> HostMetrics:
     mem_total_kb: int | None = None
     load1: float | None = None
     nproc: int | None = None
+    temp_celsius: float | None = None
     errors: list[str] = []
 
     for raw_line in output.splitlines():
@@ -104,6 +136,9 @@ def parse_metrics_output(host_name: str, output: str) -> HostMetrics:
             load1 = float(parts[1])
         elif kind == "NPROC" and len(parts) == 2:
             nproc = int(parts[1])
+        elif kind == "TEMP" and len(parts) == 2:
+            # Optional: absent TEMP line means no sensor (e.g. Proxmox LXC).
+            temp_celsius = float(parts[1])
         else:
             errors.append(f"unrecognised metric line: {line}")
 
@@ -130,6 +165,7 @@ def parse_metrics_output(host_name: str, output: str) -> HostMetrics:
         mem_total_kb=mem_total_kb,
         load1=load1,
         nproc=nproc,
+        temp_celsius=temp_celsius,
     )
 
 
